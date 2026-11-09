@@ -25,6 +25,7 @@ import json
 import time
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from config import UPLOAD_DIR
 
 router = APIRouter(prefix="/api/detect", tags=["Detection"])
@@ -206,6 +207,9 @@ def process_video_worker(job_id: str, video_path: str, output_path: str, process
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
+    # Executor for parallel AI inference
+    executor = ThreadPoolExecutor(max_workers=4)
+
     # Stats tracking
     frame_num = 0
     total_people = 0
@@ -290,11 +294,45 @@ def process_video_worker(job_id: str, video_path: str, output_path: str, process
                 writer.write(frame)
                 continue
 
-            # ===== Run ALL detections =====
+            # ===== SPEED OPTIMIZATION: Downscale for AI =====
+            # AI models work better/faster on 640px width
+            ai_frame = cv2.resize(frame, (640, int(640 * height / width)))
 
-            # 1. Crowd Detection
-            crowd_frame = frame.copy()
-            crowd_result = detect_crowd(crowd_frame)
+            # ===== Run ALL detections in PARALLEL =====
+            # We use a ThreadPool to run these heavy models concurrently
+            future_crowd = executor.submit(detect_crowd, ai_frame.copy())
+            future_emg = executor.submit(detect_emergency, ai_frame.copy())
+
+            # Only run Face Search if we have registered persons
+            future_face = None
+            if embedding_cache:
+                # Face search is very heavy, run it every other processed frame
+                if frame_num % (process_every_n * 2) == 0:
+                    future_face = executor.submit(face_search, ai_frame.copy())
+
+            # Gather results (wait for them to finish)
+            crowd_result = future_crowd.result()
+            emg_result = future_emg.result()
+
+            # Rescale crowd boxes back to original resolution
+            scale_w = width / 640
+            scale_h = height / (640 * height / width)
+
+            # Apply results to original frame
+            # We must update crowd_result["frame"] because it was based on ai_frame
+            # Since detect_crowd draws on the frame, we'll redraw on the original 'frame'
+            # based on scaled boxes if we want high-res output.
+            # For now, we'll use the annotated ai_frame scaled up for simplicity
+            # or just use the result data.
+
+            # To keep high quality output, we redraw the results on the original frame
+            annotated = frame.copy()
+
+            # Redraw Crowd (simplified: using the returned frame scaled up)
+            # A better way would be to pass boxes and draw them manually
+            # but for speed, let's use the AI annotated frame scaled back
+            annotated = cv2.resize(crowd_result["frame"], (width, height))
+
             people_count = crowd_result["count"]
             total_people += people_count
             max_people = max(max_people, people_count)

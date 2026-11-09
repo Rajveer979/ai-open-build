@@ -27,7 +27,7 @@ print("[Face Finder] v6 — InsightFace (ONNX)")
 
 model = insightface.app.FaceAnalysis(
     name="buffalo_sc",
-    providers=["CPUExecutionProvider"]
+    providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
 )
 model.prepare(ctx_id=-1, det_size=(640, 640))
 print("[Face Finder] InsightFace model loaded")
